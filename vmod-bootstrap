@@ -1,0 +1,490 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use File::Slurp ();
+use JSON::XS    ();
+use Template    ();
+
+sub check_prereq {
+   my %prereq = (
+       'aclocal' => 'automake',
+       'libtool' => 'libtool',
+       'rst2man' => 'rst2man (python-docutils)',
+   );
+   for my $exec (keys %prereq) {
+     if (! which($exec)) {
+       my $package = $prereq{$exec};
+       die "ERROR: you need to install $package to continue\n";
+     }
+   }
+}
+
+sub which {
+    my $arg = shift;
+    for (qw{/usr/local/bin /usr/bin}) {
+        my $exec = "$_/$arg";
+        $exec = readlink $exec while -l $exec;
+        if (-x $exec) { return 1 }
+    }
+    return;
+}
+
+sub inflate_m4_dir {
+
+    # Inflate m4 directory with placeholder
+    if (!-e './m4') {
+        File::Path::mkpath('./m4', 0, 0755);
+        open my $m4_placeholder, '>', './m4/PLACEHOLDER';
+        close $m4_placeholder;
+    }
+    else {
+        warn "NOTICE: not touching existing ./m4 directory\n";
+    }
+    return;
+}
+
+sub inflate_src_dir {
+    my $tmpl_vars = shift;
+    my $tt        = Template->new();
+
+    # Inflate src directory too
+    if (!-e './src') {
+        File::Path::mkpath('./src', 0, 0755);
+        my $vmod_name = $tmpl_vars->{vmod}->{name};
+        for my $fname (
+            qw{
+            src/vmod_example.vcc
+            src/vmod_example.c
+            }
+            )
+        {
+            my $content    = load_file_from_data($fname);
+            my $real_fname = $fname;
+            $real_fname =~ s{example}{$vmod_name};
+            my $out;
+            $tt->process(\$content, $tmpl_vars, \$out)
+                or die "Failed to process template: $@\n";
+            open my $out_fh, '>', $real_fname;
+            print $out_fh $out;
+            close $out_fh;
+        }
+    }
+    else {
+        warn "NOTICE: not touching existing ./src directory\n";
+    }
+    return;
+}
+
+sub load_file_from_data {
+    my ($file_name) = @_;
+    my $content;
+
+    my $data = \*DATA;
+    seek($data, 0, 0);
+    my $found_file = 0;
+
+    while (readline $data) {
+        if ($found_file) {
+            last if m{^%% \s+}x;
+            $content .= $_;
+        }
+        else {
+            if (m{^%% \s+ $file_name \s* $}x) {
+                $found_file = 1;
+                next;
+            }
+        }
+    }
+
+    if (!$content) {
+        die "Couldn't find '$file_name' in DATA section (?)\n";
+    }
+
+    return $content;
+}
+
+my $conf_file = 'vmod.conf';
+if (!-e $conf_file) {
+    die "You need a '$conf_file' file\n";
+}
+
+check_prereq();
+
+my $vmod_conf_content = File::Slurp::read_file($conf_file);
+my $vmod_conf         = JSON::XS->new->relaxed->decode($vmod_conf_content);
+my $tt                = Template->new();
+
+my @time = localtime();
+my $date = sprintf "%04d-%02d-%02d", $time[5] + 1900, $time[4] + 1, $time[3];
+
+my $tmpl_vars = {
+    vmod  => $vmod_conf,
+    today => $date,
+};
+
+inflate_m4_dir();
+inflate_src_dir($tmpl_vars);
+
+for my $fname (
+    qw{
+    configure.ac
+    autogen.sh
+    Makefile.am
+    README.rst
+    LICENSE
+    COPYING
+    src/Makefile.am
+    }
+    )
+{
+
+    my $tmpl = load_file_from_data($fname);
+    my $out;
+    $tt->process(\$tmpl, $tmpl_vars, \$out)
+        or die "Problem processing the $fname template: $@\n";
+
+    open my $out_fh, '>', $fname;
+    print $out_fh $out;
+    close $out_fh;
+
+}
+
+# Make autogen executable
+chmod 0755 => './autogen.sh';
+
+__DATA__
+%% configure.ac
+AC_PREREQ(2.59)
+AC_COPYRIGHT([[% vmod.copyright %]])
+AC_INIT([libvmod-[% vmod.name %]], [[% vmod.version || '0.01' %]])
+AC_CONFIG_MACRO_DIR([m4])
+AC_CONFIG_SRCDIR(src/vmod_[% vmod.name %].vcc)
+AM_CONFIG_HEADER(config.h)
+
+AC_CANONICAL_SYSTEM
+AC_LANG(C)
+
+AM_INIT_AUTOMAKE([foreign])
+
+AC_GNU_SOURCE
+AC_PROG_CC
+AC_PROG_CC_STDC
+if test "x$ac_cv_prog_cc_c99" = xno; then
+	AC_MSG_ERROR([Could not find a C99 compatible compiler])
+fi
+AC_PROG_CPP
+
+AC_PROG_INSTALL
+AC_PROG_LIBTOOL
+AC_PROG_MAKE_SET
+
+[% IF vmod.required_libs %][% FOR lib IN vmod.required_libs %]
+AC_CHECK_LIB([% lib.name %], [% lib.function %], [AC_DEFINE([HAVE_[% lib.name | upper %]],[1],[Define we have [% lib.name %]])],
+		[AC_MSG_ERROR([libvmod-[% vmod.name %] requires lib[% lib.name %].])])
+[% END %][% END %]
+
+# Check for rst utilities
+AC_CHECK_PROGS(RST2MAN, [rst2man rst2man.py], "no")
+if test "x$RST2MAN" = "xno"; then
+	AC_MSG_WARN([rst2man not found - not building man pages])
+fi
+AM_CONDITIONAL(HAVE_RST2MAN, [test "x$RST2MAN" != "xno"])
+
+# Check for pkg-config
+PKG_PROG_PKG_CONFIG
+
+# Checks for header files.
+AC_HEADER_STDC
+AC_CHECK_HEADERS([sys/stdlib.h])
+
+# Check for python
+AC_CHECK_PROGS(PYTHON, [python3 python3.1 python3.2 python2.7 python2.6 python2.5 python2 python], [AC_MSG_ERROR([Python is needed to build this vmod, please install python.])])
+
+# Varnish source tree
+AC_ARG_VAR([VARNISHSRC], [path to Varnish source tree (mandatory)])
+if test "x$VARNISHSRC" = x; then
+	AC_MSG_ERROR([No Varnish source tree specified])
+fi
+VARNISHSRC=`cd $VARNISHSRC && pwd`
+AC_CHECK_FILE([$VARNISHSRC/include/varnishapi.h],
+	[],
+	[AC_MSG_FAILURE(["$VARNISHSRC" is not a Varnish source directory])]
+)
+
+# Check that varnishtest is built in the varnish source directory
+AC_CHECK_FILE([$VARNISHSRC/bin/varnishtest/varnishtest],
+	[],
+	[AC_MSG_FAILURE([Can't find "$VARNISHSRC/bin/varnishtest/varnishtest". Please build your varnish source directory])]
+)
+
+# vmod installation dir
+AC_ARG_VAR([VMODDIR], [vmod installation directory @<:@LIBDIR/varnish/vmods@:>@])
+if test "x$VMODDIR" = x; then
+	VMODDIR=`pkg-config --variable=vmoddir varnishapi`
+	if test "x$VMODDIR" = x; then
+		AC_MSG_FAILURE([Can't determine vmod installation directory])
+	fi
+fi
+
+AC_CONFIG_FILES([
+	Makefile
+	src/Makefile
+])
+AC_OUTPUT
+%% autogen.sh
+#!/bin/sh
+
+warn() {
+	echo "WARNING: $@" 1>&2
+}
+
+case `uname -s` in
+Darwin)
+	LIBTOOLIZE=glibtoolize
+	;;
+FreeBSD)
+	LIBTOOLIZE=libtoolize
+	;;
+Linux)
+	LIBTOOLIZE=libtoolize
+	;;
+SunOS)
+	LIBTOOLIZE=libtoolize
+	;;
+*)
+	warn "unrecognized platform:" `uname -s`
+	LIBTOOLIZE=libtoolize
+esac
+
+automake_version=`automake --version | tr ' ' '\n' | egrep '^[0-9]\.[0-9a-z.-]+'`
+if [ -z "$automake_version" ] ; then
+	warn "unable to determine automake version"
+else
+	case $automake_version in
+		0.*|1.[0-8]|1.[0-8][.-]*)
+			warn "automake ($automake_version) detected; 1.9 or newer recommended"
+			;;
+		*)
+			;;
+	esac
+fi
+
+set -ex
+
+aclocal -I m4
+$LIBTOOLIZE --copy --force
+autoheader
+automake --add-missing --copy --foreign
+autoconf
+%% Makefile.am
+ACLOCAL_AMFLAGS = -I m4
+
+SUBDIRS = src
+
+EXTRA_DIST = README.rst
+
+dist_man_MANS = vmod_[% vmod.name %].3
+MAINTAINERCLEANFILES = $(dist_man_MANS)
+
+vmod_example.3: README.rst
+if HAVE_RST2MAN
+	${RST2MAN} README.rst $@
+else
+	@echo "========================================"
+	@echo "You need rst2man installed to make dist"
+	@echo "========================================"
+	@false
+endif
+%% README.rst
+============
+vmod_[% vmod.name %]
+============
+
+----------------------
+Varnish Example Module
+----------------------
+
+:Author: [% vmod.author || 'A.U.Thor' %]
+:Date: [% today %]
+:Version: [% vmod.version %]
+:Manual section: 3
+
+SYNOPSIS
+========
+
+import [% vmod.name %];
+
+DESCRIPTION
+===========
+
+Example Varnish vmod demonstrating how to write an out-of-tree Varnish vmod.
+
+Implements BLAH BLAH BLAH functionality as a vmod.
+It is useful because BLAH BLAH BLAH.
+And you haven't changed the boilerplate documentation for it.
+Bad boy.
+
+FUNCTIONS
+=========
+
+some_function
+-----
+
+Prototype
+        ::
+
+                some_function(STRING S)
+Return value
+	STRING
+Description
+	Returns "Something"
+Example
+        ::
+
+                set resp.http.X-Hooray = [% vmod.name %].some_function("lalala");
+
+INSTALLATION
+============
+
+This is an example skeleton for developing out-of-tree Varnish
+vmods. It implements the BLAH BLAH BLAH functionality as a vmod callback.
+
+The source tree is based on autotools to configure the building, and
+does also have the necessary bits in place to do functional unit tests
+using the varnishtest tool.
+
+Usage::
+
+ ./configure VARNISHSRC=DIR [VMODDIR=DIR]
+
+`VARNISHSRC` is the directory of the Varnish source tree for which to
+compile your vmod. Both the `VARNISHSRC` and `VARNISHSRC/include`
+will be added to the include search paths for your module.
+
+Optionally you can also set the vmod install directory by adding
+`VMODDIR=DIR` (defaults to the pkg-config discovered directory from your
+Varnish installation).
+
+Make targets:
+
+* make - builds the vmod
+* make install - installs your vmod in `VMODDIR`
+* make check - runs the unit tests in ``src/tests/*.vtc``
+
+In your VCL you could then use this vmod along the following lines::
+
+        import [% vmod.name %];
+
+        sub vcl_deliver {
+            # This sets resp.http.X-Hooray to "Something"
+            set resp.http.X-Hooray = [% vmod.name %].some_function("String");
+        }
+
+HISTORY
+=======
+
+This manual page was automatically generated as part of the libvmod-[% vmod.name %] package,
+please change it to document history of this vmod.
+
+COPYRIGHT
+=========
+
+This document is licensed under the same license as the
+libvmod-[% vmod.name %] project. See LICENSE for details.
+
+* [% vmod.copyright %]
+%% LICENSE
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+%% COPYING
+[% vmod.copyright %]
+...
+See LICENSE for details.
+
+You're free to use and distribute this under terms in the
+LICENSE. Please add your relevant copyright statements.
+%% src/Makefile.am
+INCLUDES = -I$(VARNISHSRC)/include -I$(VARNISHSRC)
+
+vmoddir = $(VMODDIR)
+vmod_LTLIBRARIES = libvmod_[% vmod.name %].la
+
+libvmod_[% vmod.name %]_la_LDFLAGS = -module -export-dynamic -avoid-version
+
+libvmod_[% vmod.name %]_la_SOURCES = \
+	vcc_if.c \
+	vcc_if.h \
+	vmod_[% vmod.name %].c
+
+vcc_if.c vcc_if.h: $(VARNISHSRC)/lib/libvmod_std/vmod.py $(top_srcdir)/src/vmod_[% vmod.name %].vcc
+	@PYTHON@ $(VARNISHSRC)/lib/libvmod_std/vmod.py $(top_srcdir)/src/vmod_[% vmod.name %].vcc
+
+VMOD_TESTS = tests/*.vtc
+.PHONY: $(VMOD_TESTS)
+
+tests/*.vtc:
+	$(VARNISHSRC)/bin/varnishtest/varnishtest -Dvarnishd=$(VARNISHSRC)/bin/varnishd/varnishd -Dvmod_topbuild=$(abs_top_builddir) $@
+
+check: $(VMOD_TESTS)
+
+EXTRA_DIST = \
+	vmod_[% vmod.name %].vcc \
+	$(VMOD_TESTS)
+
+CLEANFILES = $(builddir)/vcc_if.c $(builddir)/vcc_if.h
+%% src/vmod_example.vcc
+Module [% vmod.name %]
+Init init_function
+Function STRING some_function(STRING)
+%% src/vmod_example.c
+#include <stdlib.h>
+
+#include "vrt.h"
+#include "bin/varnishd/cache.h"
+
+#include "vcc_if.h"
+
+int
+init_function(struct vmod_priv *priv, const struct VCL_conf *conf)
+{
+	return (0);
+}
+
+const char *
+vmod_some_function(struct sess *sp, const char *arg)
+{
+	char *p;
+	unsigned u, v;
+
+	u = WS_Reserve(sp->wrk->ws, 0); /* Reserve some work space */
+	p = sp->wrk->ws->f;		/* Front of workspace area */
+	v = snprintf(p, u, "Something %s", arg);
+	v++;
+	if (v > u) {
+		/* No space, reset and leave */
+		WS_Release(sp->wrk->ws, 0);
+		return (NULL);
+	}
+	/* Update work space with what we've used */
+	WS_Release(sp->wrk->ws, v);
+	return (p);
+}
