@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Clean the current directory from autoconf/automake/configure files
+# Mainly used for testing vmod-bootstrap
+#
 
 rm -f autogen.sh LICENSE COPYING Makefile.am README.rst configure.ac aclocal.m4 >/dev/null
 rm -rf autom4te.cache > /dev/null

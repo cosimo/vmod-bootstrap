@@ -1,5 +1,33 @@
 #!/usr/bin/env perl
 
+#
+# vmod-bootstrap - Bootstrap a new VMOD module for Varnish
+#
+# If you use Varnish and want to write a new VMOD module,
+# then this tool can help you bootstrap the development,
+# inflating the few files and directories you need to
+# start.
+#
+# The only requirement is to setup a config file like
+# the following:
+#
+#    {
+#        "name" : "frobnicator",
+#        "author" : "James J. Hacker",
+#        "version" : "0.01",
+#        "src" : "src/vmod_frobnicator.vcc",
+#        "required_libs" : [
+#            {
+#                "name" : "mhash",
+#                "function" : "mhash_count",
+#            },
+#        ],
+#        "copyright" : "Copyright (c) 2012 James J. Hacker",
+#    }
+#
+# Cosimo, 23/Mar/2012, VUG5
+#
+
 use strict;
 use warnings;
 use File::Slurp ();
